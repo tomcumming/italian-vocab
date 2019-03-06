@@ -2,7 +2,11 @@ import { parseString as parseXmlString } from 'xml2js';
 import * as fs from 'fs';
 import * as readline from 'readline';
 
-function parseDict(path: string): Promise<{ [word: string]: string[] }> {
+function asPronounced(word: string): string {
+    return word.normalize('NFD').replace(/[\u0300-\u036f]/g, "");
+}
+
+function parseDict(path: string): Promise<{ [word: string]: [string, string[]][] }> {
     return new Promise((res, rej) => {
         const dictString = fs.readFileSync(
             path,
@@ -16,21 +20,26 @@ function parseDict(path: string): Promise<{ [word: string]: string[] }> {
                 if(err)
                     rej(err);
 
-                let translated: { [word: string]: string[] } = {};
+                let translated: { [word: string]: [string, string[]][] } = {};
 
                 const entryNodes = result.TEI.text[0].body[0].entry;
 
                 for(const entryNode of entryNodes) {
                     const itWord: string = entryNode.form[0].orth[0];
-                    const translations: string[] = entryNode.sense
-                        .map((sense: any) => sense.cit[0].quote[0]);
+                    const translations = entryNode.sense
+                        .map((sense: any) => {
+                            const defs = sense.cit
+                                .flatMap((cit: any) => cit.quote);
+                            return [itWord, defs];
+                        });
 
-                    if(translated[itWord.toLowerCase()])
-                        translated[itWord.toLowerCase()] =
-                            translated[itWord.toLowerCase()]
-                                .concat(translations);
+                    const pro = asPronounced(itWord);
+
+                    if(translated[pro])
+                        translated[pro] =
+                            translated[pro].concat(translations);
                     else
-                        translated[itWord.toLowerCase()] = translations;
+                        translated[pro] = translations;
                 }
 
                 res(translated);
@@ -52,6 +61,7 @@ function stripQuotes(input: string): string {
     return input.substr(1, input.length - 2);
 }
 
+
 async function start() {
     const frequencyPath = process.argv[2];
     const dictPath = process.argv[3];
@@ -61,6 +71,8 @@ async function start() {
 
     const outStream = fs.openSync('dist/italian-vocab.tsv', 'w');
     fs.writeSync(outStream, "Frequency Rank\tItalian\tEnglish");
+
+    let covered = new Set<string>();
 
     let first = true;
     for await(const line of iter) {
@@ -72,10 +84,18 @@ async function start() {
         const parts = line.split(','); // lets hope this is enough ;)
         const freq = parseInt(stripQuotes(parts[0]));
         const italian = stripQuotes(parts[1]);
-        const entry = dict[italian.toLowerCase()];
+        const pro = asPronounced(italian);
+        if(covered.has(pro))
+            continue;
+        else
+            covered.add(pro);
+
+        const entry = dict[pro];
         if(entry !== undefined) {
-            const entries = entry.join(', ');
-            fs.writeSync(outStream, `\n${freq}\t${italian}\t${entries}`);
+            const entries = entry
+                .map(e => `${e[0]}: ${e[1].join(', ')}`)
+                .join('\n');
+            fs.writeSync(outStream, `\n"${freq}"\t"${italian}"\t"${entries}"`);
         }
     }
 
